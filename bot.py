@@ -15,20 +15,28 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-initial_extensions = [
-    "cogs.general",
-    "cogs.welcome",
-    "cogs.template",
-    "cogs.survey_com",
-    "cogs.leveling",
-    "cogs.leveling_com", 
-    "cogs.leveling_push",
-    "cogs.moderation.moderation",
-    "cogs.moderation.moderation_report",
-    "cogs.moderation.moderation_warns",
-    "cogs.moderation.moderation_mute",
-    "cogs.moderation.moderation_del",
-]
+async def load_extensions():
+    extensions = [
+        "cogs.general",
+        "cogs.welcome",
+        "cogs.template",
+        "cogs.survey_com",
+        "cogs.leveling",
+        "cogs.leveling_com", 
+        "cogs.leveling_push",
+        "cogs.moderation.moderation",
+        "cogs.moderation.moderation_report",
+        "cogs.moderation.moderation_warns",
+        "cogs.moderation.moderation_mute",
+        "cogs.moderation.moderation_del",
+    ]
+    
+    for ext in extensions:
+        try:
+            await bot.load_extension(ext)
+            print(f"✅ Успешно загружен: {ext}")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки {ext}: {e}")
 
 @bot.event
 async def on_ready():
@@ -67,13 +75,7 @@ async def main():
     init_db()
     
     async with bot:
-        for ext in initial_extensions:
-            try:
-                await bot.load_extension(ext)
-                print(f"✅ Успешно загружен: {ext}")
-            except Exception as e:
-                print(f"❌ Ошибка загрузки {ext}: {e}")
-        
+        await load_extensions()
         await bot.start(TOKEN)
 
 if __name__ == "__main__":

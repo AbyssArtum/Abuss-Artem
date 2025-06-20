@@ -1,14 +1,16 @@
 import discord
 from discord import app_commands, ui
 from discord.ext import commands
+from typing import Optional
 
 class ConfirmActionModal(ui.Modal, title="Подтверждение действия"):
-    def __init__(self, target: discord.Member, reason: str, action: str, cog):
+    def __init__(self, target: discord.Member, reason: str, action: str, cog, parent_view=None):
         super().__init__()
         self.target = target
         self.original_reason = reason
         self.action = action
         self.cog = cog
+        self.parent_view = parent_view
         
         self.reason = ui.TextInput(
             label="Причина",
@@ -21,15 +23,15 @@ class ConfirmActionModal(ui.Modal, title="Подтверждение дейст�
 
     async def on_submit(self, interaction: discord.Interaction):
         if self.action.lower() == "кик":
-            await self.cog.kick_user(interaction, self.target, self.reason.value, self.cog.message)
+            await self.cog.kick_user(interaction, self.target, self.reason.value, self.parent_view)
         elif self.action.lower() == "бан":
-            await self.cog.ban_user(interaction, self.target, self.reason.value, self.cog.message)
+            await self.cog.ban_user(interaction, self.target, self.reason.value, self.parent_view)
 
 class ModerationDel(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    async def kick_user(self, interaction, member, reason, report_message=None):
+    async def kick_user(self, interaction: discord.Interaction, member: discord.Member, reason: str, parent_view=None):
         try:
             await member.kick(reason=reason)
             
@@ -46,13 +48,20 @@ class ModerationDel(commands.Cog):
             await self.send_kick_notification(member, interaction.user, reason)
             
             # Обновление сообщения жалобы
-            if report_message and hasattr(self.bot.get_cog("ModerationReports"), 'log_report_action'):
-                await self.bot.get_cog("ModerationReports").log_report_action(report_message, "кик")
+            if parent_view and hasattr(self.bot.get_cog("ModerationReports"), 'log_report_action'):
+                await self.bot.get_cog("ModerationReports").log_report_action(
+                    interaction.message, 
+                    "кик", 
+                    interaction.user
+                )
+            
+            # Логирование
+            await self.log_punishment(interaction, member, "кик", reason)
 
         except Exception as e:
             await interaction.response.send_message(f"Ошибка: {e}", ephemeral=True)
 
-    async def send_kick_notification(self, member, moderator, reason):
+    async def send_kick_notification(self, member: discord.Member, moderator: discord.Member, reason: str):
         embed = discord.Embed(
             title="Вы были кикнуты",
             description=f"С сервера {moderator.guild.name} вас кикнули.",
@@ -66,7 +75,7 @@ class ModerationDel(commands.Cog):
         except:
             pass
 
-    async def ban_user(self, interaction, member, reason, report_message=None):
+    async def ban_user(self, interaction: discord.Interaction, member: discord.Member, reason: str, parent_view=None):
         try:
             await member.ban(reason=reason, delete_message_days=0)
             
@@ -83,13 +92,20 @@ class ModerationDel(commands.Cog):
             await self.send_ban_notification(member, interaction.user, reason)
             
             # Обновление сообщения жалобы
-            if report_message and hasattr(self.bot.get_cog("ModerationReports"), 'log_report_action'):
-                await self.bot.get_cog("ModerationReports").log_report_action(report_message, "бан")
+            if parent_view and hasattr(self.bot.get_cog("ModerationReports"), 'log_report_action'):
+                await self.bot.get_cog("ModerationReports").log_report_action(
+                    interaction.message, 
+                    "бан", 
+                    interaction.user
+                )
+            
+            # Логирование
+            await self.log_punishment(interaction, member, "бан", reason)
 
         except Exception as e:
             await interaction.response.send_message(f"Ошибка: {e}", ephemeral=True)
 
-    async def send_ban_notification(self, member, moderator, reason):
+    async def send_ban_notification(self, member: discord.Member, moderator: discord.Member, reason: str):
         embed = discord.Embed(
             title="Вы были забанены",
             description=f"На сервере {moderator.guild.name} вас забанили.",
@@ -102,6 +118,26 @@ class ModerationDel(commands.Cog):
             await member.send(embed=embed)
         except:
             pass
+
+    async def log_punishment(self, interaction: discord.Interaction, target: discord.Member, action: str, reason: str):
+        base_cog = self.bot.get_cog("ModerationBase")
+        if not base_cog or not base_cog.data["log_channels"]["punishments"]:
+            return
+            
+        channel = self.bot.get_channel(base_cog.data["log_channels"]["punishments"])
+        if not channel:
+            return
+            
+        embed = discord.Embed(
+            title=f"Действие модерации: {action.upper()}",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="Модератор", value=interaction.user.mention)
+        embed.add_field(name="Участник", value=target.mention)
+        embed.add_field(name="Причина", value=reason)
+        
+        await channel.send(embed=embed)
 
     @app_commands.command(name="кик", description="Кикнуть участника с сервера")
     @app_commands.describe(участник="Участник для кика", причина="Причина")
@@ -145,6 +181,9 @@ class ModerationDel(commands.Cog):
                 await user.send(embed=embed)
             except:
                 pass
+            
+            # Логирование
+            await self.log_punishment(interaction, user, "разбан", причина or "Не указана")
             
         except Exception as e:
             await interaction.response.send_message(f"Ошибка: {e}", ephemeral=True)
