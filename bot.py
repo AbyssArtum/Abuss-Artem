@@ -41,7 +41,9 @@ async def load_extensions():
 @bot.event
 async def on_ready():
     bot.add_view(SurveyButton())
-    bot.add_view(SurveyModerationView(user_id=0))
+    # Удалите эту строку или замените на что-то вроде:
+    if hasattr(SurveyModerationView, 'user_id'):
+        bot.add_view(SurveyModerationView(user_id=0))
     
     print(f"✅ Бот {bot.user} запущен и готов к работе!")
     print(f"✅ Подключен к {len(bot.guilds)} серверам")
