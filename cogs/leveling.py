@@ -1,12 +1,36 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import sqlite3
 import os
 import datetime
 import asyncio
 from typing import Optional
 import random
+import sqlite3
+
+class LevelingCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.db = sqlite3.connect('data/main.db')
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        if message.author.bot:
+            return
+
+        # Добавляем опыт
+        cursor = self.db.cursor()
+        cursor.execute("""
+            INSERT OR IGNORE INTO users (user_id, guild_id) 
+            VALUES (?, ?)
+        """, (message.author.id, message.guild.id))
+
+        cursor.execute("""
+            UPDATE levels 
+            SET xp = xp + ?, last_active = CURRENT_TIMESTAMP
+            WHERE user_id = ? AND guild_id = ?
+        """, (10, message.author.id, message.guild.id))
+        self.db.commit()
 
 LEVEL_SETTINGS = {
     'text_xp_min': 10,

@@ -12,6 +12,15 @@ logger = logging.getLogger(__name__)
 CONFIG_FILE = "data/survey_config.json"
 SURVEY_DATA_DIR = "data/surveys"
 
+class SurveyModal(ui.Modal):
+    async def on_submit(self, interaction: discord.Interaction):
+        cursor = self.bot.db.cursor()
+        cursor.execute("""
+            INSERT INTO surveys (user_id, guild_id, content)
+            VALUES (?, ?, ?)
+        """, (interaction.user.id, interaction.guild.id, json.dumps(анкета_в_json)))
+        self.bot.db.commit()
+
 if not os.path.exists(SURVEY_DATA_DIR):
     os.makedirs(SURVEY_DATA_DIR)
 
