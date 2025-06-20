@@ -1,155 +1,86 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import json
-import os
-from datetime import datetime
-from cogs.survey_modal import SurveyModal
+from typing import Optional
+from utils.user_data import get_user_data, save_user_data
 
-CONFIG_FILE = "data/survey_config.json"
-
-def load_config():
-    if not os.path.exists(CONFIG_FILE):
-        return {}
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_config(config):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, ensure_ascii=False, indent=4)
-
-class SurveyCommands(commands.Cog):
+class LevelingAdminCommands(commands.Cog):  # Изменили название класса
     def __init__(self, bot):
         self.bot = bot
-
-    async def get_survey_embed(self, user_id: int):
-        """Создает embed для просмотра анкеты"""
-        try:
-            # Используем существующую функцию из utils/db.py
-            from utils.db import get_survey_by_user
-            
-            data = get_survey_by_user(user_id)
-            if not data:
-                return None
-
-            # Получаем объект пользователя
-            user = await self.bot.fetch_user(user_id)
-            status = data.get("status", "на модерации")
-            
-            # Создаем embed
-            embed = discord.Embed(
-                title=f"Анкета пользователя {user.display_name}",
-                color=discord.Color.blue()
-            )
-            
-            # Добавляем поля анкеты
-            embed.add_field(name="Имя/Псевдоним", value=data.get("name", "Не указано"), inline=False)
-            embed.add_field(name="Возраст", value=data.get("age", "Не указано"), inline=False)
-            embed.add_field(name="Деятельность", value=data.get("creative_fields", "Не указано"), inline=False)
-            
-            # Обрабатываем поле "О себе" (ограничение длины)
-            about = data.get("about", "Не указано")
-            if len(about) > 1000:
-                about = about[:1000] + "..."
-            embed.add_field(name="О себе", value=about, inline=False)
-            
-            # Обработка статуса анкеты
-            if status == "rejected":
-                embed.color = discord.Color.red()
-                embed.add_field(name="Причина отклонения", 
-                              value=data.get("reject_reason", "Не указана"), 
-                              inline=False)
-            elif status == "approved":
-                embed.color = discord.Color.green()
-            
-            # Устанавливаем footer с статусом
-            status_text = {
-                "approved": "одобрена",
-                "rejected": "отклонена",
-            }.get(status, "на модерации")
-            
-            embed.set_footer(text=f"Статус: {status_text}")
-            
-            return embed
-
-        except Exception as e:
-            print(f"Ошибка при создании embed: {e}")
-            return None
-
-    @app_commands.command(name="анкета", description="Управление анкетами")
+        self.VOICE_XP_PER_MIN = 20
+        
+    @app_commands.command(name="опыт", description="Управление опытом участников")
+    @app_commands.default_permissions(administrator=True)
     @app_commands.describe(
-        действие="Выберите действие: редактировать, посмотреть, настроить",
-        участник="Участник для просмотра анкеты (требуется, если действие 'посмотреть')",
-        цель="Что настраиваем (модерация или публикация, требуется при 'настроить')",
-        канал="Канал для настройки (требуется при 'настроить')"
+        действие="Начислить или снять опыт",
+        тип="Тип опыта: общий или голосовой",
+        количество="Количество (число для общего, минуты для голосового)",
+        участник="Участник, которому начисляем/снимаем"
     )
     @app_commands.choices(
         действие=[
-            app_commands.Choice(name="редактировать", value="edit"),
-            app_commands.Choice(name="посмотреть", value="view"),
-            app_commands.Choice(name="настроить", value="config"),
+            app_commands.Choice(name="начислить", value="add"),
+            app_commands.Choice(name="снять", value="remove")
         ],
-        цель=[
-            app_commands.Choice(name="модерация", value="moderation"),
-            app_commands.Choice(name="публикация", value="publication"),
+        тип=[
+            app_commands.Choice(name="общий", value="general"),
+            app_commands.Choice(name="голосовой", value="voice")
         ]
     )
-    async def анкета(
-        self,
-        interaction: discord.Interaction,
-        действие: app_commands.Choice[str],
-        участник: discord.Member = None,
-        цель: app_commands.Choice[str] = None,
-        канал: discord.TextChannel = None
-    ):
+    async def manage_xp(self, interaction: discord.Interaction, действие: app_commands.Choice[str],
+                       тип: app_commands.Choice[str], количество: int, участник: discord.Member):
         try:
-            if действие.value == "edit":
-                await interaction.response.send_modal(SurveyModal())
-                return
-
-            await interaction.response.defer(ephemeral=True)
-
-            if действие.value == "view":
-                if not участник:
-                    await interaction.followup.send(
-                        "❌ Для просмотра анкеты укажите участника.", 
-                        ephemeral=True
-                    )
-                    return
-                
-                embed = await self.get_survey_embed(участник.id)
-                
-                if embed:
-                    await interaction.followup.send(embed=embed, ephemeral=True)
-                else:
-                    await interaction.followup.send(
-                        "❌ Анкета не найдена в системе.", 
-                        ephemeral=True
-                    )
-
-            elif действие.value == "config":
-                if not цель or not канал:
-                    await interaction.followup.send(
-                        "❌ Для настройки укажите цель и канал.",
-                        ephemeral=True
-                    )
-                    return
-                
-                config = load_config()
-                config[цель.value] = str(канал.id)
-                save_config(config)
-                
-                await interaction.followup.send(
-                    f"✅ Канал для **{цель.name}** установлен: {канал.mention}",
+            if количество <= 0:
+                return await interaction.response.send_message(
+                    "❌ Количество должно быть положительным числом!",
                     ephemeral=True
                 )
+            
+            await interaction.response.defer(ephemeral=True)
+            user_data = get_user_data(участник.id)
+            
+            # Инициализация структуры
+            if "leveling" not in user_data:
+                user_data["leveling"] = {
+                    "text_xp": 0,
+                    "voice_xp": 0,
+                    "total_xp": 0,
+                    "level": 1,
+                    "voice_time": 0  # Добавляем отсутствующее поле
+                }
+            
+            # Добавляем voice_time, если его нет
+            if "voice_time" not in user_data["leveling"]:
+                user_data["leveling"]["voice_time"] = 0
+            
+            if тип.value == "voice":
+                old_time = user_data["leveling"]["voice_time"]
+                change = количество if действие.value == "add" else -количество
+                new_time = max(0, old_time + change)
                 
+                if действие.value == "remove" and количество > old_time:
+                    return await interaction.followup.send(
+                        f"❌ У участника только {old_time} минут, нельзя снять {количество}!",
+                        ephemeral=True
+                    )
+                
+                user_data["leveling"]["voice_time"] = new_time
+                user_data["leveling"]["voice_xp"] = new_time * self.VOICE_XP_PER_MIN
+                user_data["leveling"]["total_xp"] = user_data["leveling"]["text_xp"] + user_data["leveling"]["voice_xp"]
+                
+                action_word = "начислено" if действие.value == "add" else "снято"
+                await interaction.followup.send(
+                    f"✅ {участник.mention}: {action_word} {количество} мин. голосовой активности. Теперь: {new_time} мин.",
+                    ephemeral=True
+                )
+            
+            save_user_data(участник.id, user_data)
+            
         except Exception as e:
-            error_msg = f"⚠️ Произошла ошибка: {str(e)}"
-            if interaction.response.is_done():
-                await interaction.followup.send(error_msg, ephemeral=True)
-            else:
-                await interaction.response.send_message(error_msg, ephemeral=True)
+            await interaction.followup.send(
+                f"❌ Ошибка: {str(e)}",
+                ephemeral=True
+            )
 
 async def setup(bot):
-    await bot.add_cog(SurveyCommands(bot))
+    await bot.add_cog(LevelingAdminCommands(bot))  # Используем новое название класса
