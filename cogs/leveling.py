@@ -1,14 +1,12 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import os
 import datetime
 import asyncio
 import random
 import json
 from pathlib import Path
 from typing import Optional
-from utils.user_data import get_user_data, save_user_data
 
 # Настройки системы уровней
 LEVEL_SETTINGS = {
@@ -22,6 +20,20 @@ LEVEL_SETTINGS = {
     'save_interval': 300
 }
 
+def get_user_data(user_id):
+    """Загружает данные пользователя из файла"""
+    path = Path(f"data/users/{user_id}.json")
+    if path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"user_id": user_id}
+
+def save_user_data(user_id, data):
+    """Сохраняет данные пользователя в файл"""
+    Path("data/users").mkdir(parents=True, exist_ok=True)
+    with open(f"data/users/{user_id}.json", "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
 class LeaderboardPaginator(discord.ui.View):
     def __init__(self, bot, guild_id, total_pages):
         super().__init__(timeout=60)
@@ -29,7 +41,8 @@ class LeaderboardPaginator(discord.ui.View):
         self.guild_id = guild_id
         self.current_page = 1
         self.total_pages = total_pages
-    
+        self.message = None
+
     async def update_embed(self, interaction: discord.Interaction):
         embed = await self.create_leaderboard_embed(self.bot, self.guild_id, self.current_page)
         await interaction.response.edit_message(embed=embed, view=self)
@@ -125,6 +138,13 @@ class LevelingSystem(commands.Cog):
         while xp >= self.get_level_xp(level):
             level += 1
         return level
+
+    def get_user_stats(self, user_id, guild_id):
+        """Возвращает текущий опыт и уровень пользователя"""
+        user_data = get_user_data(user_id)
+        if "leveling" not in user_data:
+            return 0, 1
+        return user_data["leveling"]["total_xp"], user_data["leveling"]["level"]
 
     async def voice_activity_task(self):
         while True:
@@ -320,10 +340,4 @@ class LevelingSystem(commands.Cog):
         )
 
 async def setup(bot):
-    cog = LevelingSystem(bot)
-    await bot.add_cog(cog)
-    
-    if not bot.tree.get_command("ранг"):
-        bot.tree.add_command(cog.rank)
-    if not bot.tree.get_command("лидеры"):
-        bot.tree.add_command(cog.top)
+    await bot.add_cog(LevelingSystem(bot))
