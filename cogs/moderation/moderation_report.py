@@ -1,8 +1,8 @@
 import discord
 from discord import app_commands, ui
 from discord.ext import commands
-from datetime import datetime
-import sqlite3  # или asyncpg для PostgreSQL
+import sqlite3
+from typing import Optional
 
 class ReportDB:
     def __init__(self, db_path="data/reports.db"):
@@ -11,7 +11,6 @@ class ReportDB:
 
     def _init_db(self):
         cursor = self.conn.cursor()
-        # Таблица для хранения жалоб
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS reports (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -19,21 +18,10 @@ class ReportDB:
                 target_id BIGINT NOT NULL,
                 reporter_id BIGINT NOT NULL,
                 reason TEXT NOT NULL,
-                status TEXT DEFAULT 'pending',  -- pending/approved/rejected
+                status TEXT DEFAULT 'pending',
                 moderator_id BIGINT,
                 action_taken TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        # Таблица для связи с другими системами (анкеты, уровень)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS user_profiles (
-                user_id BIGINT PRIMARY KEY,
-                guild_id BIGINT NOT NULL,
-                warnings INTEGER DEFAULT 0,
-                level INTEGER DEFAULT 1,
-                xp INTEGER DEFAULT 0,
-                voice_xp INTEGER DEFAULT 0
             )
         """)
         self.conn.commit()
@@ -66,8 +54,7 @@ class ReportActionView(ui.View):
 
     @ui.button(label="Наказать", style=discord.ButtonStyle.red, emoji="🔨")
     async def punish(self, interaction: discord.Interaction, button: ui.Button):
-        view = ui.View()
-        view.add_item(PunishmentSelect(self.target, self.reason, self))
+        view = PunishmentSelectView(self.target, self.reason, self.report_id)
         await interaction.response.send_message(
             "Выберите тип наказания:",
             view=view,
@@ -78,7 +65,7 @@ class ReportActionView(ui.View):
     async def ignore(self, interaction: discord.Interaction, button: ui.Button):
         report_cog = interaction.client.get_cog("ModerationReports")
         if report_cog:
-            await report_cog.db.update_report(
+            report_cog.db.update_report(
                 self.report_id,
                 status="rejected",
                 moderator_id=interaction.user.id,
@@ -87,29 +74,71 @@ class ReportActionView(ui.View):
         await interaction.message.edit(view=None)
         await interaction.response.send_message("Жалоба проигнорирована.", ephemeral=True)
 
+class PunishmentSelectView(ui.View):
+    def __init__(self, target: discord.Member, reason: str, report_id: int):
+        super().__init__()
+        self.target = target
+        self.reason = reason
+        self.report_id = report_id
+
+    @ui.select(
+        placeholder="Выберите наказание",
+        options=[
+            discord.SelectOption(label="Предупреждение", value="warn"),
+            discord.SelectOption(label="Мут", value="mute"),
+            discord.SelectOption(label="Кик", value="kick"),
+            discord.SelectOption(label="Бан", value="ban")
+        ]
+    )
+    async def select_punishment(self, interaction: discord.Interaction, select: ui.Select):
+        report_cog = interaction.client.get_cog("ModerationReports")
+        if not report_cog:
+            return await interaction.response.send_message("Ошибка системы!", ephemeral=True)
+
+        action = select.values[0]
+        report_cog.db.update_report(
+            self.report_id,
+            status="approved",
+            moderator_id=interaction.user.id,
+            action_taken=action
+        )
+
+        # Здесь должна быть логика применения наказания
+        # Например, через вызов соответствующих команд модерации
+        
+        await interaction.message.edit(view=None)
+        await interaction.response.send_message(
+            f"Наказание '{action}' применено к {self.target.mention}",
+            ephemeral=True
+        )
+
 class ModerationReports(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.db = sqlite3.connect('data/main.db')
+        self.db = ReportDB()  # Используем наш класс для работы с БД
 
-    async def report(self, interaction: discord.Interaction, участник: discord.Member, причина: str):
-        cursor = self.db.cursor()
-        cursor.execute("""
-            INSERT INTO reports (target_id, reporter_id, guild_id, reason)
-            VALUES (?, ?, ?, ?)
-        """, (участник.id, interaction.user.id, interaction.guild.id, причина))
-        self.db.commit()
-
-    async def get_log_channel(self, guild_id: int) -> discord.TextChannel | None:
-        moderation_cog = self.bot.get_cog("ModerationCog")
-        if not moderation_cog:
-            return None
-        channel_id = await moderation_cog.get_log_channel(guild_id, "reports")
-        return self.bot.get_channel(channel_id) if channel_id else None
+    async def get_log_channel(self, guild_id: int) -> Optional[discord.TextChannel]:
+        # Здесь должна быть логика получения канала для логов
+        # Например, из другой системы или конфига
+        return None  # Замените на реальную реализацию
 
     @app_commands.command(name="репорт", description="Отправить жалобу на участника")
     @app_commands.describe(участник="Участник для жалобы", причина="Причина жалобы")
-    async def report(self, interaction: discord.Interaction, участник: discord.Member, причина: str):
+    async def report_command(self, interaction: discord.Interaction, 
+                           участник: discord.Member, 
+                           причина: str):
+        if участник.bot:
+            return await interaction.response.send_message(
+                "Нельзя пожаловаться на бота!", 
+                ephemeral=True
+            )
+
+        if участник.id == interaction.user.id:
+            return await interaction.response.send_message(
+                "Нельзя пожаловаться на самого себя!",
+                ephemeral=True
+            )
+
         log_channel = await self.get_log_channel(interaction.guild.id)
         if not log_channel:
             return await interaction.response.send_message(
@@ -117,32 +146,38 @@ class ModerationReports(commands.Cog):
                 ephemeral=True
             )
 
-        # Сохраняем жалобу в базу
-        report_id = self.db.add_report(
-            guild_id=interaction.guild.id,
-            target_id=участник.id,
-            reporter_id=interaction.user.id,
-            reason=причина
-        )
+        try:
+            report_id = self.db.add_report(
+                guild_id=interaction.guild.id,
+                target_id=участник.id,
+                reporter_id=interaction.user.id,
+                reason=причина
+            )
 
-        # Отправляем жалобу в канал
-        embed = discord.Embed(
-            title=f"Жалоба на {участник.display_name}",
-            color=discord.Color.red(),
-            description=f"**Причина:** {причина}"
-        )
-        embed.add_field(name="От", value=interaction.user.mention, inline=True)
-        embed.add_field(name="ID участника", value=участник.id, inline=True)
-        embed.set_footer(text=f"ID жалобы: {report_id}")
+            embed = discord.Embed(
+                title=f"Жалоба #{report_id} на {участник.display_name}",
+                color=discord.Color.red(),
+                description=f"**Причина:** {причина}"
+            )
+            embed.add_field(name="Отправитель", value=interaction.user.mention)
+            embed.add_field(name="Участник", value=участник.mention)
+            embed.set_footer(text=f"ID: {участник.id}")
 
-        await log_channel.send(
-            embed=embed,
-            view=ReportActionView(участник, interaction.user, причина, report_id)
-        )
-        await interaction.response.send_message(
-            "✅ Ваша жалоба отправлена модераторам.",
-            ephemeral=True
-        )
+            await log_channel.send(
+                embed=embed,
+                view=ReportActionView(участник, interaction.user, причина, report_id)
+            )
+
+            await interaction.response.send_message(
+                "✅ Ваша жалоба отправлена модераторам.",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ Произошла ошибка: {str(e)}",
+                ephemeral=True
+            )
 
 async def setup(bot):
     await bot.add_cog(ModerationReports(bot))

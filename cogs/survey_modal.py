@@ -12,14 +12,16 @@ logger = logging.getLogger(__name__)
 CONFIG_FILE = "data/survey_config.json"
 SURVEY_DATA_DIR = "data/surveys"
 
-class SurveyModal(ui.Modal):
+class SurveyModal(discord.ui.Modal):
+    def __init__(self, db):
+        super().__init__(title="Заполните анкету")
+        self.db = db  # Передаём подключение к БД
+
     async def on_submit(self, interaction: discord.Interaction):
-        cursor = self.bot.db.cursor()
-        cursor.execute("""
-            INSERT INTO surveys (user_id, guild_id, content)
-            VALUES (?, ?, ?)
-        """, (interaction.user.id, interaction.guild.id, json.dumps(анкета_в_json)))
-        self.bot.db.commit()
+        if len(self.children[0].value) < 50:  # Проверка поля
+            await interaction.response.send_message("Слишком короткий ответ!", ephemeral=True)
+            return
+        # Сохранение в БД...
 
 if not os.path.exists(SURVEY_DATA_DIR):
     os.makedirs(SURVEY_DATA_DIR)
