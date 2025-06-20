@@ -4,34 +4,13 @@ from discord import app_commands
 import os
 import datetime
 import asyncio
-from typing import Optional
 import random
-import sqlite3
+import json
+from pathlib import Path
+from typing import Optional
+from utils.user_data import get_user_data, save_user_data
 
-class LevelingCog(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-        self.db = sqlite3.connect('data/main.db')
-
-    @commands.Cog.listener()
-    async def on_message(self, message):
-        if message.author.bot:
-            return
-
-        # Добавляем опыт
-        cursor = self.db.cursor()
-        cursor.execute("""
-            INSERT OR IGNORE INTO users (user_id, guild_id) 
-            VALUES (?, ?)
-        """, (message.author.id, message.guild.id))
-
-        cursor.execute("""
-            UPDATE levels 
-            SET xp = xp + ?, last_active = CURRENT_TIMESTAMP
-            WHERE user_id = ? AND guild_id = ?
-        """, (10, message.author.id, message.guild.id))
-        self.db.commit()
-
+# Настройки системы уровней
 LEVEL_SETTINGS = {
     'text_xp_min': 10,
     'text_xp_max': 25,
@@ -57,38 +36,44 @@ class LeaderboardPaginator(discord.ui.View):
     
     @staticmethod
     async def create_leaderboard_embed(bot, guild_id, page):
-        conn = sqlite3.connect('data/levels.db')
-        cursor = conn.cursor()
+        # Собираем данные всех пользователей
+        user_data = []
+        guild = bot.get_guild(guild_id)
         
-        # Получаем общее количество участников
-        cursor.execute('SELECT COUNT(*) FROM levels WHERE guild_id=?', (guild_id,))
-        total_users = cursor.fetchone()[0]
+        # Сканируем все файлы пользователей
+        user_files = Path("data/users").glob("*.json")
+        for file in user_files:
+            with open(file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if "leveling" in data:
+                    user_data.append({
+                        'user_id': data['user_id'],
+                        'xp': data['leveling'].get('total_xp', 0),
+                        'level': data['leveling'].get('level', 1),
+                        'voice_time': data['leveling'].get('voice_time', 0)
+                    })
+        
+        # Сортируем по XP
+        user_data.sort(key=lambda x: x['xp'], reverse=True)
         
         # Получаем топ для текущей страницы
         offset = (page - 1) * 10
-        cursor.execute('''
-            SELECT user_id, xp, level, voice_time FROM levels 
-            WHERE guild_id=? 
-            ORDER BY xp DESC 
-            LIMIT 10 OFFSET ?
-        ''', (guild_id, offset))
-        top_users = cursor.fetchall()
-        conn.close()
+        top_users = user_data[offset:offset+10]
+        total_users = len(user_data)
         
         # Создаем список лидеров
         leaderboard = []
-        for rank, (user_id, xp, level, voice_time) in enumerate(top_users, start=offset+1):
-            guild = bot.get_guild(guild_id)
-            member = guild.get_member(user_id) if guild else None
-            name = member.display_name if member else f"Неизвестный ({user_id})"
-            voice_time_str = LevelingSystem.format_voice_time(voice_time)
+        for rank, user in enumerate(top_users, start=offset+1):
+            member = guild.get_member(user['user_id']) if guild else None
+            name = member.display_name if member else f"Неизвестный ({user['user_id']})"
+            voice_time_str = LevelingSystem.format_voice_time(user['voice_time'])
             
             if rank == 1:
-                entry = f"🏆 **#{rank}. {name}**\nУровень: {level} | Опыт: {xp} | 🔊 {voice_time_str}"
+                entry = f"🏆 **#{rank}. {name}**\nУровень: {user['level']} | Опыт: {user['xp']} | 🔊 {voice_time_str}"
             elif rank in (2, 3):
-                entry = f"🎖️ **#{rank}. {name}**\nУровень: {level} | Опыт: {xp} | 🔊 {voice_time_str}"
+                entry = f"🎖️ **#{rank}. {name}**\nУровень: {user['level']} | Опыт: {user['xp']} | 🔊 {voice_time_str}"
             else:
-                entry = f"**#{rank}. {name}**\nУровень: {level} | Опыт: {xp}" + (f" | 🔊 {voice_time_str}" if voice_time > 0 else "")
+                entry = f"**#{rank}. {name}**\nУровень: {user['level']} | Опыт: {user['xp']}" + (f" | 🔊 {voice_time_str}" if user['voice_time'] > 0 else "")
             
             leaderboard.append(entry)
 
@@ -124,29 +109,7 @@ class LevelingSystem(commands.Cog):
         self.bot = bot
         self.voice_users = {}
         self.last_message = {}
-        self.voice_xp_per_min = LEVEL_SETTINGS['voice_xp_per_min']
-        self.setup_db()
         self.voice_task = self.bot.loop.create_task(self.voice_activity_task())
-
-    def setup_db(self):
-        os.makedirs('data', exist_ok=True)
-        self.conn = sqlite3.connect('data/levels.db')
-        self.cursor = self.conn.cursor()
-        
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS levels (
-                user_id INTEGER,
-                guild_id INTEGER,
-                xp INTEGER DEFAULT 0,
-                level INTEGER DEFAULT 1,
-                text_xp INTEGER DEFAULT 0,
-                voice_xp INTEGER DEFAULT 0,
-                voice_time INTEGER DEFAULT 0,
-                last_update TEXT,
-                PRIMARY KEY (user_id, guild_id)
-            )
-        ''')
-        self.conn.commit()
 
     def cog_unload(self):
         if self.voice_task:
@@ -180,72 +143,38 @@ class LevelingSystem(commands.Cog):
                 )
                 self.voice_users[user_id] = (channel_id, datetime.datetime.now())
 
-    def get_user_stats(self, user_id, guild_id):
-        """Получает текущий XP и уровень пользователя"""
-        self.cursor.execute(
-            'SELECT xp, level FROM levels WHERE user_id=? AND guild_id=?',
-            (user_id, guild_id)
-        )
-        result = self.cursor.fetchone()
-        return result if result else (0, 1)
-
     async def update_level(self, user_id, guild_id, xp_earned=0, is_voice=False, voice_minutes=0):
+        user_data = get_user_data(user_id)
+        
+        if "leveling" not in user_data:
+            user_data["leveling"] = {
+                "text_xp": 0,
+                "voice_xp": 0,
+                "total_xp": 0,
+                "level": 1,
+                "voice_time": 0
+            }
+        
+        # Обновляем опыт
         xp_earned = int(xp_earned * (LEVEL_SETTINGS['voice_multiplier'] if is_voice else 1))
         
-        self.cursor.execute(
-            'SELECT xp, level FROM levels WHERE user_id=? AND guild_id=?',
-            (user_id, guild_id)
-        )
-        result = self.cursor.fetchone()
-
-        if not result:
-            self.cursor.execute(
-                '''INSERT INTO levels 
-                (user_id, guild_id, xp, level, text_xp, voice_xp, voice_time, last_update) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                (user_id, guild_id, max(0, xp_earned), 1, 
-                 0 if is_voice else max(0, xp_earned),
-                 max(0, xp_earned) if is_voice else 0,
-                 max(0, voice_minutes), 
-                 datetime.datetime.now().isoformat())
-            )
-            xp, level = max(0, xp_earned), 1
+        if is_voice:
+            user_data["leveling"]["voice_xp"] += xp_earned
+            user_data["leveling"]["voice_time"] += voice_minutes
         else:
-            xp, level = result
-            xp = max(0, xp + xp_earned)  # Защита от отрицательного XP
-            
-            if is_voice:
-                self.cursor.execute(
-                    '''UPDATE levels SET 
-                    xp=?, voice_xp=voice_xp+?, voice_time=voice_time+?,
-                    last_update=? 
-                    WHERE user_id=? AND guild_id=?''',
-                    (xp, max(0, xp_earned), max(0, voice_minutes),
-                     datetime.datetime.now().isoformat(), user_id, guild_id)
-                )
-            else:
-                self.cursor.execute(
-                    '''UPDATE levels SET 
-                    xp=?, text_xp=text_xp+?, 
-                    last_update=? 
-                    WHERE user_id=? AND guild_id=?''',
-                    (xp, max(0, xp_earned),
-                     datetime.datetime.now().isoformat(), user_id, guild_id)
-                )
-
-        new_level = max(1, self.get_level_from_xp(xp))  # Минимальный уровень - 1
-        leveled_up = new_level > level
-        leveled_down = new_level < level
-
-        if leveled_up or leveled_down:
-            self.cursor.execute(
-                'UPDATE levels SET level=? WHERE user_id=? AND guild_id=?',
-                (new_level, user_id, guild_id)
-            )
-            self.conn.commit()
-            return new_level
+            user_data["leveling"]["text_xp"] += xp_earned
         
-        self.conn.commit()
+        user_data["leveling"]["total_xp"] += xp_earned
+        
+        # Проверяем уровень
+        old_level = user_data["leveling"]["level"]
+        new_level = max(1, self.get_level_from_xp(user_data["leveling"]["total_xp"]))
+        user_data["leveling"]["level"] = new_level
+        
+        save_user_data(user_id, user_data)
+        
+        if new_level > old_level:
+            return new_level
         return None
     
     def create_progress_bar(self, progress):
@@ -269,7 +198,6 @@ class LevelingSystem(commands.Cog):
             return
 
         user_id = message.author.id
-        guild_id = message.guild.id
         now = datetime.datetime.now().timestamp()
 
         if user_id in self.last_message:
@@ -278,7 +206,7 @@ class LevelingSystem(commands.Cog):
 
         self.last_message[user_id] = now
         xp = random.randint(LEVEL_SETTINGS['text_xp_min'], LEVEL_SETTINGS['text_xp_max'])
-        new_level = await self.update_level(user_id, guild_id, xp)
+        new_level = await self.update_level(user_id, message.guild.id, xp)
 
         if new_level:
             await message.channel.send(
@@ -316,30 +244,51 @@ class LevelingSystem(commands.Cog):
                                 delete_after=10
                             )
 
+    def get_user_rank(self, user_id, guild_id):
+        # Этот метод теперь работает с JSON данными
+        user_data_list = []
+        
+        for file in Path("data/users").glob("*.json"):
+            with open(file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if "leveling" in data:
+                    user_data_list.append({
+                        'user_id': data['user_id'],
+                        'xp': data['leveling'].get('total_xp', 0)
+                    })
+        
+        user_data_list.sort(key=lambda x: x['xp'], reverse=True)
+        
+        for rank, user in enumerate(user_data_list, start=1):
+            if user['user_id'] == user_id:
+                return rank
+        
+        return None
+
     @app_commands.command(name="ранг", description="Показать ваш уровень и статистику")
     @app_commands.describe(участник="Участник, чей уровень хотите проверить")
     async def rank(self, interaction: discord.Interaction, участник: Optional[discord.Member] = None):
         target = участник or interaction.user
-        self.cursor.execute(
-            '''SELECT xp, level, text_xp, voice_xp, voice_time 
-            FROM levels 
-            WHERE user_id=? AND guild_id=?''',
-            (target.id, interaction.guild_id)
-        )
-        result = self.cursor.fetchone()
-
-        if not result:
+        user_data = get_user_data(target.id)
+        
+        if "leveling" not in user_data:
             await interaction.response.send_message(
                 f"{target.display_name} ещё не имеет уровня.",
                 ephemeral=True
             )
             return
 
-        xp, level, text_xp, voice_xp, voice_time = result
+        leveling_data = user_data["leveling"]
+        xp = leveling_data.get("total_xp", 0)
+        level = leveling_data.get("level", 1)
+        text_xp = leveling_data.get("text_xp", 0)
+        voice_xp = leveling_data.get("voice_xp", 0)
+        voice_time = leveling_data.get("voice_time", 0)
+        
         current_level_xp = self.get_level_xp(level-1)
         next_level_xp = self.get_level_xp(level)
         progress = min(100, int((xp - current_level_xp) / (next_level_xp - current_level_xp) * 100))
-        rank = self.get_rank(target.id, interaction.guild_id)
+        rank = self.get_user_rank(target.id, interaction.guild_id)
         
         embed = discord.Embed(
             title=f"Статистика {target.display_name}",
@@ -358,21 +307,12 @@ class LevelingSystem(commands.Cog):
         
         await interaction.response.send_message(embed=embed)
 
-    def get_rank(self, user_id, guild_id):
-        self.cursor.execute('''
-            SELECT user_id FROM levels 
-            WHERE guild_id=? 
-            ORDER BY xp DESC
-        ''', (guild_id,))
-        top_users = [row[0] for row in self.cursor.fetchall()]
-        return top_users.index(user_id) + 1 if user_id in top_users else None
-
     @app_commands.command(name="лидеры", description="Топ активных участников сервера")
     async def top(self, interaction: discord.Interaction):
-        self.cursor.execute('SELECT COUNT(*) FROM levels WHERE guild_id=?', (interaction.guild_id,))
-        total_users = self.cursor.fetchone()[0]
+        # Считаем общее количество пользователей с данными об уровне
+        user_count = sum(1 for _ in Path("data/users").glob("*.json") if "leveling" in json.load(open(_, "r", encoding="utf-8")))
+        total_pages = max(1, (user_count // 10) + 1)
         
-        total_pages = max(1, (total_users // 10) + 1)
         view = LeaderboardPaginator(self.bot, interaction.guild_id, total_pages)
         view.message = await interaction.response.send_message(
             embed=await LeaderboardPaginator.create_leaderboard_embed(self.bot, interaction.guild_id, 1),

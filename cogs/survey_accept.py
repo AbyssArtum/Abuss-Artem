@@ -3,8 +3,9 @@ from discord.ext import commands
 from discord import app_commands
 import re
 import json
+from datetime import datetime
 
-from utils.db import save_survey, get_survey_by_user  # <-- исправлено здесь
+from utils.db import save_survey, get_survey_by_user, update_survey_status  # Добавлен новый импорт
 
 CONFIG_PATH = "config.json"
 REACTION_EMOJI = "❤️"
@@ -97,19 +98,65 @@ class ModerationButtons(discord.ui.View):
 
         msg = await channel.send(embed=embed)
         await msg.add_reaction(REACTION_EMOJI)
+        
+        # Обновляем статус анкеты
+        update_survey_status(self.author.id, "approved")
         await interaction.response.send_message("✅ Анкета одобрена и опубликована.", ephemeral=True)
 
     @discord.ui.button(label="❌ Отклонить", style=discord.ButtonStyle.danger)
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await self.author.send(
-                "❌ Ваша анкета была отклонена модератором. Вы можете отредактировать её и отправить заново с помощью команды `/анкета редактировать`."
-            )
-        except discord.Forbidden:
-            await interaction.response.send_message("⚠️ Не удалось отправить пользователю ЛС.", ephemeral=True)
+        # Получаем данные анкеты
+        data = get_survey_by_user(self.author.id)
+        if not data:
+            return await interaction.response.send_message("❌ Анкета не найдена.", ephemeral=True)
+
+        # Запрашиваем причину отклонения
+        modal = RejectReasonModal()
+        await interaction.response.send_modal(modal)
+        await modal.wait()
+
+        if not modal.reason:
             return
 
-        await interaction.response.send_message("❌ Анкета отклонена. Уведомление отправлено пользователю.", ephemeral=True)
+        # Формируем полное сообщение с анкетой
+        message = (
+            "**Ваша анкета была отклонена.**\n"
+            f"Причина: {modal.reason}\n\n"
+            "## Полный текст вашей анкеты:\n"
+            f"### Имя / Псевдоним\n{data.get('name', 'Не указано')}\n\n"
+            f"### Возраст\n{data.get('age', 'Не указано')}\n\n"
+            f"### Вид деятельности\n{data.get('creative_fields', 'Не указано')}\n\n"
+            f"### О себе\n{data.get('about', 'Не указано')}\n\n"
+            f"### Соцсети\n{data.get('socials', 'Не указаны')}\n\n"
+            "Вы можете отредактировать анкету и отправить её заново с помощью команды `/анкета редактировать`"
+        )
+
+        try:
+            await self.author.send(message)
+        except discord.Forbidden:
+            await interaction.followup.send("⚠️ Не удалось отправить пользователю ЛС.", ephemeral=True)
+        else:
+            await interaction.followup.send("❌ Анкета отклонена. Уведомление отправлено пользователю.", ephemeral=True)
+        
+        # Обновляем статус анкеты
+        update_survey_status(self.author.id, "rejected", modal.reason)
+
+
+class RejectReasonModal(discord.ui.Modal, title="Укажите причину отклонения"):
+    reason = discord.ui.TextInput(
+        label="Причина отклонения",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=500
+    )
+
+    def __init__(self):
+        super().__init__()
+        self.reason = None
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.reason = self.reason.value
+        await interaction.response.defer()
 
 
 class SurveyCog(commands.Cog):
@@ -142,18 +189,26 @@ class SurveyCog(commands.Cog):
             if not data:
                 return await interaction.response.send_message("❌ Анкета не найдена.", ephemeral=True)
 
+            status = data.get("status", "на модерации")
+            status_emoji = "✅" if status == "approved" else "❌" if status == "rejected" else "🕒"
+            
             embed = discord.Embed(
-                title=f"📝 Анкета пользователя {user.display_name}",
-                color=discord.Color.green()
+                title=f"{status_emoji} Анкета пользователя {user.display_name}",
+                color=discord.Color.green() if status == "approved" else discord.Color.red() if status == "rejected" else discord.Color.orange()
             )
             embed.add_field(name="Имя / Псевдоним", value=data["name"], inline=False)
             embed.add_field(name="Возраст", value=data["age"], inline=False)
             embed.add_field(name="Вид деятельности", value=data["creative_fields"], inline=False)
             embed.add_field(name="О себе", value=data["about"], inline=False)
             embed.add_field(name="Соцсети", value=data["socials"] if data["socials"] else "—", inline=False)
-            embed.set_footer(text=f"Пользователь: {user.display_name}")
+            
+            if status == "rejected" and data.get("reject_reason"):
+                embed.add_field(name="Причина отклонения", value=data["reject_reason"], inline=False)
+                
+            embed.set_footer(text=f"Статус: {'одобрена' if status == 'approved' else 'отклонена' if status == 'rejected' else 'на модерации'}")
 
             await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 async def setup(bot):
     await bot.add_cog(SurveyCog(bot))

@@ -17,7 +17,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 async def load_extensions():
     extensions = [
-        "cogs.guild",
         "cogs.general",
         "cogs.welcome",
         "cogs.template",

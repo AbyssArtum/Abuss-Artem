@@ -64,7 +64,7 @@ class SurveyCommands(commands.Cog):
                     )
                     return
                 
-                from data.survey_storage import get_survey_embed
+                from data.users import get_survey_embed
                 embed = get_survey_embed(участник.id)
                 
                 if embed:
